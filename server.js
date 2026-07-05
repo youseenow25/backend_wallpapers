@@ -122,7 +122,9 @@ async function syncWallpapersToStripe() {
   );
   for (const w of wallpapers) {
     try {
-      const images = w.cover_image?.startsWith('https://') ? [w.cover_image] : [];
+      const images = w.cover_image
+        ? (w.cover_image.startsWith('http') ? [w.cover_image] : [`${BACKEND_URL}${w.cover_image}`])
+        : [];
       const product = await stripe.products.create({
         name: w.title,
         description: w.description || undefined,
@@ -323,7 +325,11 @@ app.post('/api/checkout/session', async (req, res) => {
             description: discount
               ? `${discount.percent}% bundle discount applied — original price $${Number(w.price).toFixed(2)}`
               : (w.description?.slice(0, 200) || undefined),
-            images: w.cover_image?.startsWith('https://') ? [w.cover_image] : [],
+            images: (() => {
+              if (!w.cover_image) return [];
+              if (w.cover_image.startsWith('http')) return [w.cover_image];
+              return [`${BACKEND_URL}${w.cover_image}`];
+            })(),
             metadata: { wallpaper_id: String(w.id) },
           },
           unit_amount: discountedCents,
