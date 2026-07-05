@@ -147,8 +147,16 @@ async function syncWallpapersToStripe() {
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
+const ALLOWED_ORIGINS = [
+  FRONTEND_URL,
+  'https://outbbo.com',
+  'https://www.outbbo.com',
+];
 app.use(cors({
-  origin: FRONTEND_URL,
+  origin: (origin, cb) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    cb(new Error('Not allowed by CORS'));
+  },
   credentials: true,
 }));
 app.use(express.json());
