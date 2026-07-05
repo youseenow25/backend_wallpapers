@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin — WALLVAULT</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/admin.css">
+</head>
+<body class="admin-page">
+
+  <aside class="sidebar">
+    <div class="sidebar-logo">WALLVAULT</div>
+    <nav class="sidebar-nav">
+      <button class="nav-item active" data-panel="wallpapers">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        Wallpapers
+      </button>
+      <button class="nav-item" data-panel="orders">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6M9 16h6M17 2H7a2 2 0 00-2 2v16a2 2 0 002 2h10a2 2 0 002-2V4a2 2 0 00-2-2z"/></svg>
+        Orders
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <a href="http://localhost:3000" class="sidebar-link">← View Store</a>
+      <button id="logoutBtn" class="sidebar-link danger">Sign Out</button>
+    </div>
+  </aside>
+
+  <main class="admin-main">
+    <section class="panel" id="panel-wallpapers">
+      <div class="panel-head">
+        <div>
+          <h1 class="panel-title">Wallpapers</h1>
+          <p class="panel-sub" id="wallpaperCount">Loading…</p>
+        </div>
+        <button class="a-btn-primary" id="openAddModal">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Wallpaper
+        </button>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="wallpaperTable">
+          <thead>
+            <tr>
+              <th style="width:60px">ID</th>
+              <th style="width:72px">Cover</th>
+              <th>Title</th>
+              <th>Price</th>
+              <th>Type</th>
+              <th>Tags</th>
+              <th>Featured</th>
+              <th>Date</th>
+              <th style="width:110px">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="wallpaperTbody">
+            <tr><td colspan="8" class="table-loading">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-orders" style="display:none">
+      <div class="panel-head">
+        <div>
+          <h1 class="panel-title">Orders</h1>
+          <p class="panel-sub" id="ordersCount">Loading…</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="ordersTable">
+          <thead>
+            <tr>
+              <th style="width:60px">ID</th>
+              <th>Email</th>
+              <th>Wallpapers</th>
+              <th>Total</th>
+              <th>Payment</th>
+              <th>Date</th>
+              <th style="width:80px">Stripe</th>
+            </tr>
+          </thead>
+          <tbody id="ordersTbody">
+            <tr><td colspan="7" class="table-loading">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div class="a-modal-bg" id="formModalBg">
+    <div class="a-modal-box">
+      <div class="a-modal-head">
+        <h2 id="formModalTitle">Add Wallpaper</h2>
+        <button class="a-icon-btn" id="closeFormModal">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form id="wallpaperForm" enctype="multipart/form-data">
+        <input type="hidden" id="editId">
+        <div class="form-grid">
+          <div class="field full">
+            <label for="fTitle">Title *</label>
+            <input type="text" id="fTitle" placeholder="e.g. Neon Tokyo" required>
+          </div>
+          <div class="field full">
+            <label for="fDesc">Description</label>
+            <textarea id="fDesc" rows="5" placeholder="Describe the wallpaper — mood, subject, colors, what makes it special…" maxlength="1000"></textarea>
+            <p class="char-count"><span id="descCount">0</span> / 1000</p>
+          </div>
+          <div class="field">
+            <label for="fPrice">Price (USD) *</label>
+            <input type="number" id="fPrice" placeholder="6.99" step="0.01" min="0" required>
+          </div>
+          <div class="field">
+            <label for="fTags">Tags <span class="label-hint">(comma separated)</span></label>
+            <input type="text" id="fTags" placeholder="nature, city, abstract">
+          </div>
+          <div class="field">
+            <label for="fType">Type</label>
+            <select id="fType">
+              <option value="nature">Nature</option>
+              <option value="abstract">Abstract</option>
+              <option value="dark">Dark / Moody</option>
+              <option value="minimal">Minimal</option>
+              <option value="urban">Urban / City</option>
+              <option value="space">Space</option>
+              <option value="neon">Neon</option>
+              <option value="texture">Texture</option>
+              <option value="architecture">Architecture</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="fCover">Cover Image</label>
+            <div class="file-upload" id="coverUpload">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <span id="coverLabel">Click or drag to upload</span>
+              <input type="file" id="fCover" name="cover" accept="image/*">
+            </div>
+            <div class="cover-preview-wrap" id="coverPreviewWrap" style="display:none">
+              <img id="coverPreview" alt="Preview">
+              <button type="button" class="remove-preview" id="removeCover">✕</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="fFile">Wallpaper File <span class="label-hint">(ZIP / PNG / JPEG)</span></label>
+            <div class="file-upload" id="fileUpload">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <span id="fileLabel">Click or drag to upload</span>
+              <input type="file" id="fFile" name="file" accept=".zip,.png,.jpg,.jpeg">
+            </div>
+          </div>
+          <div class="field full">
+            <label class="checkbox-label">
+              <input type="checkbox" id="fFeatured">
+              <span class="checkbox-custom"></span>
+              Featured product
+            </label>
+          </div>
+        </div>
+        <p class="form-error" id="formError"></p>
+        <div class="form-actions">
+          <button type="button" class="a-btn-secondary" id="cancelForm">Cancel</button>
+          <button type="submit" class="a-btn-primary" id="submitForm">Save Wallpaper</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="a-modal-bg" id="deleteModalBg">
+    <div class="a-modal-box small">
+      <h2>Delete Wallpaper?</h2>
+      <p style="color:var(--a-text-2);margin:0.75rem 0 1.5rem">This action cannot be undone.</p>
+      <div class="form-actions">
+        <button class="a-btn-secondary" id="cancelDelete">Cancel</button>
+        <button class="a-btn-danger" id="confirmDelete">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/admin.js"></script>
+</body>
+</html>
