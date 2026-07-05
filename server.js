@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { Resend } = require('resend');
+const sharp = require('sharp');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -176,6 +177,84 @@ const storage = multer.diskStorage({
   },
 });
 const upload = multer({ storage, limits: { fileSize: 200 * 1024 * 1024 } });
+
+// ── Watermarked cover images ──────────────────────────────────────────────────
+
+const coverCache = new Map(); // simple in-memory cache
+
+function makeWatermarkSvg(width, height) {
+  const fontSize = Math.max(14, Math.min(24, Math.round(width / 25)));
+  const colStep = fontSize * 7;
+  const rowStep = fontSize * 4;
+  const texts = [];
+  for (let row = -2; row < Math.ceil(height / rowStep) + 2; row++) {
+    for (let col = -2; col < Math.ceil(width / colStep) + 2; col++) {
+      const x = col * colStep + (row % 2 === 0 ? 0 : colStep / 2);
+      const y = row * rowStep;
+      texts.push(
+        `<text x="${x}" y="${y}" font-family="sans-serif" font-size="${fontSize}" letter-spacing="3" fill="rgba(255,255,255,0.28)" transform="rotate(-30,${x},${y})">outbbo</text>`
+      );
+    }
+  }
+  return Buffer.from(`<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">${texts.join('')}</svg>`);
+}
+
+function fetchImageBuffer(url, redirects = 5) {
+  return new Promise((resolve, reject) => {
+    if (url.startsWith('/')) {
+      // Local file
+      const abs = path.join(__dirname, url.replace(/^\//, ''));
+      if (fs.existsSync(abs)) return resolve(fs.readFileSync(abs));
+      return reject(new Error('File not found: ' + url));
+    }
+    const mod = url.startsWith('https') ? require('https') : require('http');
+    mod.get(url, (res) => {
+      if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location && redirects > 0) {
+        return resolve(fetchImageBuffer(res.headers.location, redirects - 1));
+      }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+app.get('/api/covers/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (coverCache.has(id)) {
+      const cached = coverCache.get(id);
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(cached);
+    }
+
+    const { rows } = await pool.query('SELECT cover_image FROM wallpapers WHERE id = $1', [id]);
+    if (!rows[0]?.cover_image) return res.status(404).end();
+
+    const raw = await fetchImageBuffer(rows[0].cover_image);
+    const image = sharp(raw);
+    const { width, height } = await image.metadata();
+    const wm = makeWatermarkSvg(width, height);
+
+    const output = await image
+      .composite([{ input: wm, blend: 'over' }])
+      .jpeg({ quality: 82 })
+      .toBuffer();
+
+    // Cap cache at 100 entries
+    if (coverCache.size >= 100) coverCache.delete(coverCache.keys().next().value);
+    coverCache.set(id, output);
+
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(output);
+  } catch (err) {
+    console.error('Cover watermark error:', err.message);
+    res.status(500).end();
+  }
+});
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
