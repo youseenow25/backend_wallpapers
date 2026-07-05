@@ -8,7 +8,6 @@ const Stripe = require('stripe');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { Resend } = require('resend');
 const sharp = require('sharp');
 
 const app = express();
@@ -17,9 +16,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'wv-secret-key-change-in-production
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin1234';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 4000}`;
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 [
   path.join(__dirname, 'uploads/covers'),
@@ -50,6 +49,9 @@ async function initDb() {
   // Add stripe_product_id column if it doesn't exist (for existing DBs)
   await pool.query(`
     ALTER TABLE wallpapers ADD COLUMN IF NOT EXISTS stripe_product_id TEXT DEFAULT ''
+  `);
+  await pool.query(`
+    ALTER TABLE wallpapers ADD COLUMN IF NOT EXISTS cross_sell_price_id TEXT DEFAULT ''
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS download_tokens (
@@ -113,6 +115,23 @@ function getDiscountTier(totalItems) {
   return DISCOUNT_TIERS.find(d => totalItems >= d.minItems) || null;
 }
 
+const CROSS_SELL_DISCOUNT_PERCENT = 15;
+
+// Returns a Stripe Price ID discounted by CROSS_SELL_DISCOUNT_PERCENT for the
+// given wallpaper, creating (and caching in the DB) one if it doesn't exist yet.
+async function getOrCreateCrossSellPrice(w) {
+  if (w.cross_sell_price_id) return w.cross_sell_price_id;
+  if (!w.stripe_product_id) return null;
+  const discountedCents = Math.round(Number(w.price) * 100 * (1 - CROSS_SELL_DISCOUNT_PERCENT / 100));
+  const price = await stripe.prices.create({
+    product: w.stripe_product_id,
+    unit_amount: discountedCents,
+    currency: 'usd',
+  });
+  await pool.query('UPDATE wallpapers SET cross_sell_price_id = $1 WHERE id = $2', [price.id, w.id]);
+  return price.id;
+}
+
 
 // ── Stripe: sync wallpapers to Stripe Products ───────────────────────────────
 
@@ -154,6 +173,10 @@ const ALLOWED_ORIGINS = [
   FRONTEND_URL,
   'https://outbbo.com',
   'https://www.outbbo.com',
+  'https://app.outbbo.com',
+  'https://wallpapers-i14ny5wfe-aanhari2026-4185s-projects.vercel.app',
+  'https://wallpapers-nnwa9i980-aanhari2026-4185s-projects.vercel.app',
+  'https://wallpapers-cyan.vercel.app',
 ];
 app.use(cors({
   origin: (origin, cb) => {
@@ -338,6 +361,26 @@ app.post('/api/checkout/session', async (req, res) => {
       };
     }).filter(Boolean);
 
+    // Cross-sells: suggest a couple of related wallpapers (not already in the
+    // cart) at a discount, shown by Stripe directly on the Checkout page.
+    const { rows: crossSellCandidates } = await pool.query(
+      `SELECT id, title, price, stripe_product_id, cross_sell_price_id FROM wallpapers
+       WHERE NOT (id = ANY($1)) AND stripe_product_id != ''
+       ORDER BY featured DESC, created_at DESC LIMIT 2`,
+      [ids],
+    );
+    const optional_items = [];
+    for (const w of crossSellCandidates) {
+      const priceId = await getOrCreateCrossSellPrice(w).catch(() => null);
+      if (priceId) {
+        optional_items.push({
+          price: priceId,
+          quantity: 1,
+          adjustable_quantity: { enabled: true, minimum: 0, maximum: 1 },
+        });
+      }
+    }
+
     const sessionParams = {
       payment_method_types: ['card'],
       line_items,
@@ -349,6 +392,7 @@ app.post('/api/checkout/session', async (req, res) => {
         discount_percent: String(discount?.percent || 0),
       },
     };
+    if (optional_items.length) sessionParams.optional_items = optional_items;
     if (email) sessionParams.customer_email = email;
 
     const session = await stripe.checkout.sessions.create(sessionParams);
@@ -381,28 +425,50 @@ app.get('/api/checkout/verify/:sessionId', async (req, res) => {
     );
     let orderId = existing[0]?.id;
     if (!orderId) {
-      const wallpaper_ids = session.metadata?.wallpaper_ids || '[]';
+      // Derive what was actually purchased from Stripe's own line items —
+      // not just the metadata captured at session creation — so any
+      // cross-sell item the customer added on the Checkout page is included.
+      const { data: lineItems } = await stripe.checkout.sessions.listLineItems(session.id, {
+        expand: ['data.price.product'],
+        limit: 100,
+      });
+      const purchasedIds = lineItems
+        .map(li => li.price?.product?.metadata?.wallpaper_id)
+        .filter(Boolean)
+        .map(id => parseInt(id, 10));
+      const wallpaper_ids = JSON.stringify(
+        purchasedIds.length ? purchasedIds : JSON.parse(session.metadata?.wallpaper_ids || '[]'),
+      );
       const { rows } = await pool.query(
         'INSERT INTO orders (email, wallpaper_ids, total, status, stripe_session_id) VALUES ($1,$2,$3,$4,$5) RETURNING id',
         [session.customer_email || '', wallpaper_ids, session.amount_total / 100, 'paid', session.id],
       );
       orderId = rows[0].id;
 
-      // Send download links by email
       const ids = JSON.parse(wallpaper_ids);
-      if (ids.length && session.customer_email) {
+      if (ids.length) {
         const { rows: wps } = await pool.query(
-          'SELECT id, title, file_path FROM wallpapers WHERE id = ANY($1)',
+          'SELECT id, title FROM wallpapers WHERE id = ANY($1)',
           [ids],
         );
-        sendDownloadEmail(session.customer_email, orderId, wps).catch(console.warn);
+        await createDownloadTokens(orderId, wps);
       }
     }
+
+    const { rows: tokenRows } = await pool.query(
+      `SELECT dt.token, w.title FROM download_tokens dt
+       JOIN wallpapers w ON w.id = dt.wallpaper_id
+       WHERE dt.order_id = $1 ORDER BY dt.id`,
+      [orderId],
+    );
+    const downloads = tokenRows.map(r => ({ title: r.title, url: `${BACKEND_URL}/api/download/${r.token}` }));
+
     res.json({
       orderId,
       email: session.customer_email,
       total: session.amount_total / 100,
       discountPercent: parseInt(session.metadata?.discount_percent || '0', 10),
+      downloads,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -411,55 +477,15 @@ app.get('/api/checkout/verify/:sessionId', async (req, res) => {
 
 // ── Download delivery ─────────────────────────────────────────────────────────
 
-async function sendDownloadEmail(email, orderId, wallpapers) {
-  const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+async function createDownloadTokens(orderId, wallpapers) {
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
-
-  // Generate a token per wallpaper
-  const downloads = [];
   for (const w of wallpapers) {
     const token = crypto.randomBytes(32).toString('hex');
     await pool.query(
       'INSERT INTO download_tokens (token, order_id, wallpaper_id, expires_at) VALUES ($1,$2,$3,$4)',
       [token, orderId, w.id, expiresAt],
     );
-    downloads.push({ title: w.title, url: `${BACKEND_URL}/api/download/${token}` });
   }
-
-  if (!resend) {
-    console.log('📧 [no RESEND_API_KEY] Download links for order', orderId, ':');
-    downloads.forEach(d => console.log(`  ${d.title}: ${d.url}`));
-    return;
-  }
-
-  const linksHtml = downloads.map(d =>
-    `<tr>
-      <td style="padding:10px 0;border-bottom:1px solid #e8e0d0">
-        <strong style="color:#1c1a18">${d.title}</strong>
-      </td>
-      <td style="padding:10px 0;border-bottom:1px solid #e8e0d0;text-align:right">
-        <a href="${d.url}" style="display:inline-block;background:#1c1a18;color:#f0e8d8;text-decoration:none;padding:8px 18px;font-size:12px;letter-spacing:0.1em;text-transform:uppercase">Download</a>
-      </td>
-    </tr>`
-  ).join('');
-
-  await resend.emails.send({
-    from: process.env.EMAIL_FROM || 'Wallvault <orders@wallvault.com>',
-    to: email,
-    subject: `Your Wallvault order #${orderId} is ready`,
-    html: `
-      <div style="font-family:sans-serif;max-width:520px;margin:0 auto;background:#f0e8d8;padding:40px 32px">
-        <h1 style="font-size:24px;font-weight:700;margin:0 0 8px;color:#1c1a18">Order Confirmed</h1>
-        <p style="color:#7a7060;font-size:14px;margin:0 0 28px">
-          Thank you for your purchase. Your download links are below and expire in 7 days.
-        </p>
-        <table style="width:100%;border-collapse:collapse">${linksHtml}</table>
-        <p style="color:#a09880;font-size:11px;margin:28px 0 0;text-align:center">
-          Order #${orderId} · Wallvault
-        </p>
-      </div>
-    `,
-  });
 }
 
 app.get('/api/download/:token', async (req, res) => {
