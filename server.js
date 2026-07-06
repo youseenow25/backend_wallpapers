@@ -518,6 +518,48 @@ app.get('/api/download/:token', async (req, res) => {
   }
 });
 
+// ── All-wallpapers bundle checkout ($24.99) ───────────────────────────────────
+
+app.post('/api/checkout/all-bundle', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const { rows: wallpapers } = await pool.query(
+      'SELECT id, title FROM wallpapers ORDER BY id',
+    );
+    if (!wallpapers.length) return res.status(400).json({ error: 'No wallpapers available' });
+
+    const ids = wallpapers.map(w => w.id);
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: 'Complete Wallpaper Collection',
+            description: `All ${wallpapers.length} wallpapers — yours forever`,
+          },
+          unit_amount: 2499,
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      success_url: `${FRONTEND_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_URL}/catalog`,
+      metadata: {
+        wallpaper_ids: JSON.stringify(ids),
+        discount_percent: '0',
+        is_all_bundle: 'true',
+      },
+      ...(email ? { customer_email: email } : {}),
+    });
+
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error('Bundle session error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Legacy order endpoint (kept for compatibility)
 app.post('/api/orders', async (req, res) => {
   const { email, wallpaper_ids, total } = req.body;
