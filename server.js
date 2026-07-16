@@ -655,13 +655,21 @@ app.get('/api/admin/orders', auth, async (req, res) => {
     // Enrich each order with wallpaper titles and Stripe payment link
     const enriched = await Promise.all(rows.map(async (order) => {
       let wallpaperTitles = [];
+      let wallpaperItems = [];
       try {
         const ids = JSON.parse(order.wallpaper_ids || '[]');
         if (ids.length) {
           const { rows: wps } = await pool.query(
-            'SELECT id, title FROM wallpapers WHERE id = ANY($1)', [ids]
+            'SELECT id, title, cover_image FROM wallpapers WHERE id = ANY($1)', [ids]
           );
-          wallpaperTitles = wps.map(w => w.title);
+          const byId = Object.fromEntries(wps.map(w => [w.id, w]));
+          // Preserve purchase order and include any duplicates.
+          wallpaperItems = ids.map(id => byId[id]).filter(Boolean).map(w => ({
+            id: w.id,
+            title: w.title,
+            cover: w.cover_image ? `/api/covers/${w.id}` : '',
+          }));
+          wallpaperTitles = wallpaperItems.map(w => w.title);
         }
       } catch {}
 
@@ -680,7 +688,7 @@ app.get('/api/admin/orders', auth, async (req, res) => {
         } catch {}
       }
 
-      return { ...order, wallpaperTitles, stripeUrl, paymentStatus };
+      return { ...order, wallpaperTitles, wallpaperItems, stripeUrl, paymentStatus };
     }));
 
     res.json(enriched);

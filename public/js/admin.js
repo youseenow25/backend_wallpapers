@@ -257,6 +257,15 @@ function renderOrders(orders) {
   tbody.innerHTML = orders.map(o => {
     const date = new Date(o.created_at + 'Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
     const titles = (o.wallpaperTitles || []).join(', ') || '—';
+    const items = o.wallpaperItems || [];
+    const productsCell = items.length
+      ? `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">` +
+          items.map(it => it.cover
+            ? `<img src="${esc(it.cover)}" alt="${esc(it.title)}" title="${esc(it.title)}" style="width:38px;height:28px;object-fit:cover;border-radius:4px;background:var(--a-surface-2)" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'no-thumb',title:this.title,textContent:this.alt.slice(0,3)}))">`
+            : `<span class="no-thumb" title="${esc(it.title)}" style="width:38px;height:28px;font-size:0.6rem">${esc(it.title.slice(0, 3))}</span>`
+          ).join('') +
+        `</div>`
+      : `<span style="color:var(--a-text-2);font-size:0.8rem">${esc(titles)}</span>`;
     const statusClass = o.paymentStatus === 'paid' ? 'badge-yes' : 'badge-pending';
     const stripeBtn = o.stripeUrl
       ? `<a href="${esc(o.stripeUrl)}" target="_blank" class="a-btn-icon" title="View in Stripe" style="text-decoration:none">
@@ -267,7 +276,7 @@ function renderOrders(orders) {
       <tr>
         <td style="color:var(--a-text-2)">#${o.id}</td>
         <td>${esc(o.email || '—')}</td>
-        <td style="color:var(--a-text-2);font-size:0.8rem;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(titles)}">${esc(titles)}</td>
+        <td style="max-width:260px" title="${esc(titles)}">${productsCell}</td>
         <td><strong>$${(+o.total).toFixed(2)}</strong></td>
         <td><span class="badge ${statusClass}">${esc(o.paymentStatus || o.status)}</span></td>
         <td style="color:var(--a-text-2);font-size:0.8rem;white-space:nowrap">${date}</td>
