@@ -634,6 +634,8 @@ app.put('/api/admin/wallpapers/:id', auth,
           req.params.id,
         ],
       );
+      // Bust the cached watermarked cover so a replaced image is served fresh.
+      if (req.files?.cover?.[0]) coverCache.delete(String(req.params.id));
       res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
   },
