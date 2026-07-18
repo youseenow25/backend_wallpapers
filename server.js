@@ -245,38 +245,110 @@ function fetchImageBuffer(url, redirects = 5) {
   });
 }
 
+async function getWatermarkedCover(id) {
+  if (coverCache.has(id)) return coverCache.get(id);
+
+  const { rows } = await pool.query('SELECT cover_image FROM wallpapers WHERE id = $1', [id]);
+  if (!rows[0]?.cover_image) return null;
+
+  const raw = await fetchImageBuffer(rows[0].cover_image);
+  const image = sharp(raw);
+  const { width, height } = await image.metadata();
+  const wm = makeWatermarkSvg(width, height);
+
+  const output = await image
+    .composite([{ input: wm, blend: 'over' }])
+    .jpeg({ quality: 82 })
+    .toBuffer();
+
+  // Cap cache at 100 entries
+  if (coverCache.size >= 100) coverCache.delete(coverCache.keys().next().value);
+  coverCache.set(id, output);
+  return output;
+}
+
 app.get('/api/covers/:id', async (req, res) => {
   try {
-    const id = req.params.id;
-    if (coverCache.has(id)) {
-      const cached = coverCache.get(id);
-      res.setHeader('Content-Type', 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      return res.send(cached);
-    }
-
-    const { rows } = await pool.query('SELECT cover_image FROM wallpapers WHERE id = $1', [id]);
-    if (!rows[0]?.cover_image) return res.status(404).end();
-
-    const raw = await fetchImageBuffer(rows[0].cover_image);
-    const image = sharp(raw);
-    const { width, height } = await image.metadata();
-    const wm = makeWatermarkSvg(width, height);
-
-    const output = await image
-      .composite([{ input: wm, blend: 'over' }])
-      .jpeg({ quality: 82 })
-      .toBuffer();
-
-    // Cap cache at 100 entries
-    if (coverCache.size >= 100) coverCache.delete(coverCache.keys().next().value);
-    coverCache.set(id, output);
-
+    const output = await getWatermarkedCover(req.params.id);
+    if (!output) return res.status(404).end();
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Cache-Control', 'public, max-age=86400');
     res.send(output);
   } catch (err) {
     console.error('Cover watermark error:', err.message);
+    res.status(500).end();
+  }
+});
+
+// Watermarked cover rendered inside the Mac monitor mockup shown on the
+// product detail page — so saving the preview yields the framed mockup.
+const framedCache = new Map();
+
+// Mirrors the .monitor-* CSS in the frontend at u px per on-page px (520px frame).
+function makeMonitorMockup(screenImg, screenW, screenH) {
+  const u = screenW / 488; // on-page screen is 520 - 2*16 px wide
+  const pad = Math.round(16 * u);
+  const radius = Math.round(16 * u);
+  const chin = Math.round(20 * u);
+  const neckW = Math.round(30 * u), neckH = Math.round(28 * u);
+  const baseW = Math.round(130 * u), baseH = Math.round(12 * u);
+  const margin = Math.round(36 * u);
+
+  const frameW = screenW + pad * 2;
+  const frameH = pad + screenH + chin;
+  const W = frameW + margin * 2;
+  const H = margin + frameH + neckH + baseH + margin;
+  const fx = margin, fy = margin;
+
+  const svg = Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="bezel" x1="0" y1="0" x2="0.5" y2="1">
+        <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f0f0f0"/>
+      </linearGradient>
+      <linearGradient id="neck" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#cccccc"/><stop offset="0.5" stop-color="#e0e0e0"/><stop offset="1" stop-color="#cccccc"/>
+      </linearGradient>
+      <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#d4d4d4"/><stop offset="1" stop-color="#c4c4c4"/>
+      </linearGradient>
+    </defs>
+    <rect width="${W}" height="${H}" fill="#0f0e0d"/>
+    <ellipse cx="${W / 2}" cy="${H * 0.42}" rx="${W * 0.45}" ry="${H * 0.35}" fill="#7a6040" opacity="0.18"/>
+    <rect x="${fx + neckW}" y="${fy + frameH}" width="${frameW - neckW * 2}" height="${neckH + baseH}" fill="#0f0e0d"/>
+    <rect x="${(W - neckW) / 2}" y="${fy + frameH}" width="${neckW}" height="${neckH}" fill="url(#neck)"/>
+    <rect x="${(W - baseW) / 2}" y="${fy + frameH + neckH}" width="${baseW}" height="${baseH}" rx="${baseH / 2}" fill="url(#base)"/>
+    <rect x="${fx}" y="${fy}" width="${frameW}" height="${frameH}" rx="${radius}" fill="url(#bezel)" stroke="rgba(0,0,0,0.2)" stroke-width="${u}"/>
+    <circle cx="${W / 2}" cy="${fy + 9.5 * u}" r="${2.5 * u}" fill="#b8b8b8"/>
+    <rect x="${fx + pad}" y="${fy + pad}" width="${screenW}" height="${screenH}" fill="#000"/>
+  </svg>`);
+
+  return sharp(svg)
+    .composite([{ input: screenImg, left: fx + pad, top: fy + pad }])
+    .jpeg({ quality: 88 })
+    .toBuffer();
+}
+
+app.get('/api/covers/:id/framed', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!framedCache.has(id)) {
+      const cover = await getWatermarkedCover(id);
+      if (!cover) return res.status(404).end();
+
+      const screenW = 1464, screenH = 915; // 16:10, matching the on-page mockup
+      const screen = await sharp(cover)
+        .resize(screenW, screenH, { fit: 'cover' })
+        .toBuffer();
+      const output = await makeMonitorMockup(screen, screenW, screenH);
+
+      if (framedCache.size >= 100) framedCache.delete(framedCache.keys().next().value);
+      framedCache.set(id, output);
+    }
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(framedCache.get(id));
+  } catch (err) {
+    console.error('Framed cover error:', err.message);
     res.status(500).end();
   }
 });
@@ -634,8 +706,11 @@ app.put('/api/admin/wallpapers/:id', auth,
           req.params.id,
         ],
       );
-      // Bust the cached watermarked cover so a replaced image is served fresh.
-      if (req.files?.cover?.[0]) coverCache.delete(String(req.params.id));
+      // Bust the cached watermarked covers so a replaced image is served fresh.
+      if (req.files?.cover?.[0]) {
+        coverCache.delete(String(req.params.id));
+        framedCache.delete(String(req.params.id));
+      }
       res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
   },
