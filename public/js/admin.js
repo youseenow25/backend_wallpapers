@@ -125,6 +125,15 @@ function setupWallpaperForm() {
     const file = e.target.files[0];
     if (file) document.getElementById('fileLabel').textContent = file.name;
   });
+  document.getElementById('fImages')?.addEventListener('change', e => {
+    const n = e.target.files.length;
+    document.getElementById('imagesLabel').textContent = n
+      ? `${n} image${n !== 1 ? 's' : ''} selected`
+      : 'Click or drag to upload multiple images';
+    if (n && document.getElementById('fType').value === 'other') {
+      document.getElementById('fType').value = 'pack';
+    }
+  });
 
   document.getElementById('wallpaperForm')?.addEventListener('submit', async e => {
     e.preventDefault();
@@ -147,6 +156,10 @@ function setupWallpaperForm() {
 
     const dlFile = document.getElementById('fFile').files[0];
     if (dlFile) fd.append('file', dlFile);
+
+    for (const img of document.getElementById('fImages').files) {
+      fd.append('images', img);
+    }
 
     const id = document.getElementById('editId').value;
     const method = id ? 'PUT' : 'POST';
@@ -175,6 +188,7 @@ function openAddModal() {
   document.getElementById('coverPreviewWrap').style.display = 'none';
   document.getElementById('coverLabel').textContent = 'Click or drag to upload';
   document.getElementById('fileLabel').textContent = 'Click or drag to upload';
+  document.getElementById('imagesLabel').textContent = 'Click or drag to upload multiple images';
   document.getElementById('fType').value = 'other';
   document.getElementById('descCount').textContent = '0';
   document.getElementById('formError').textContent = '';
@@ -207,6 +221,11 @@ function openEditModal(id) {
     document.getElementById('coverLabel').textContent = 'Click or drag to upload';
   }
   document.getElementById('fileLabel').textContent = w.file_path ? 'Replace file' : 'Click or drag to upload';
+  let packCount = 0;
+  try { packCount = JSON.parse(w.images || '[]').length; } catch {}
+  document.getElementById('imagesLabel').textContent = packCount
+    ? `Pack of ${packCount} — select files to replace`
+    : 'Click or drag to upload multiple images';
 
   openModal('formModalBg');
 }

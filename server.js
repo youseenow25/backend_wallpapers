@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const sharp = require('sharp');
+const archiver = require('archiver');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -65,6 +66,10 @@ async function initDb() {
   `);
   await pool.query(`
     ALTER TABLE wallpapers ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'other'
+  `);
+  // Packs: JSON array of /uploads/covers/... paths for multi-image products.
+  await pool.query(`
+    ALTER TABLE wallpapers ADD COLUMN IF NOT EXISTS images TEXT DEFAULT ''
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -245,13 +250,25 @@ function fetchImageBuffer(url, redirects = 5) {
   });
 }
 
-async function getWatermarkedCover(id) {
-  if (coverCache.has(id)) return coverCache.get(id);
+function parsePackImages(images) {
+  try {
+    const arr = JSON.parse(images || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
 
-  const { rows } = await pool.query('SELECT cover_image FROM wallpapers WHERE id = $1', [id]);
-  if (!rows[0]?.cover_image) return null;
+// imgIdx: undefined → the main cover; a number → that pack image.
+async function getWatermarkedCover(id, imgIdx) {
+  const key = imgIdx === undefined ? String(id) : `${id}:${imgIdx}`;
+  if (coverCache.has(key)) return coverCache.get(key);
 
-  const raw = await fetchImageBuffer(rows[0].cover_image);
+  const { rows } = await pool.query('SELECT cover_image, images FROM wallpapers WHERE id = $1', [id]);
+  if (!rows[0]) return null;
+  let src = rows[0].cover_image;
+  if (imgIdx !== undefined) src = parsePackImages(rows[0].images)[imgIdx];
+  if (!src) return null;
+
+  const raw = await fetchImageBuffer(src);
   const image = sharp(raw);
   const { width, height } = await image.metadata();
   const wm = makeWatermarkSvg(width, height);
@@ -263,7 +280,7 @@ async function getWatermarkedCover(id) {
 
   // Cap cache at 100 entries
   if (coverCache.size >= 100) coverCache.delete(coverCache.keys().next().value);
-  coverCache.set(id, output);
+  coverCache.set(key, output);
   return output;
 }
 
@@ -276,6 +293,22 @@ app.get('/api/covers/:id', async (req, res) => {
     res.send(output);
   } catch (err) {
     console.error('Cover watermark error:', err.message);
+    res.status(500).end();
+  }
+});
+
+// Watermarked pack image by index.
+app.get('/api/covers/:id/img/:idx', async (req, res) => {
+  try {
+    const idx = parseInt(req.params.idx, 10);
+    if (Number.isNaN(idx) || idx < 0) return res.status(400).end();
+    const output = await getWatermarkedCover(req.params.id, idx);
+    if (!output) return res.status(404).end();
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(output);
+  } catch (err) {
+    console.error('Pack image watermark error:', err.message);
     res.status(500).end();
   }
 });
@@ -331,8 +364,11 @@ function makeMonitorMockup(screenImg, screenW, screenH) {
 app.get('/api/covers/:id/framed', async (req, res) => {
   try {
     const id = req.params.id;
-    if (!framedCache.has(id)) {
-      const cover = await getWatermarkedCover(id);
+    const imgIdx = req.query.img !== undefined ? parseInt(req.query.img, 10) : undefined;
+    if (imgIdx !== undefined && (Number.isNaN(imgIdx) || imgIdx < 0)) return res.status(400).end();
+    const key = imgIdx === undefined ? id : `${id}:${imgIdx}`;
+    if (!framedCache.has(key)) {
+      const cover = await getWatermarkedCover(id, imgIdx);
       if (!cover) return res.status(404).end();
 
       const screenW = 1464, screenH = 915; // 16:10, matching the on-page mockup
@@ -342,11 +378,11 @@ app.get('/api/covers/:id/framed', async (req, res) => {
       const output = await makeMonitorMockup(screen, screenW, screenH);
 
       if (framedCache.size >= 100) framedCache.delete(framedCache.keys().next().value);
-      framedCache.set(id, output);
+      framedCache.set(key, output);
     }
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Cache-Control', 'public, max-age=86400');
-    res.send(framedCache.get(id));
+    res.send(framedCache.get(key));
   } catch (err) {
     console.error('Framed cover error:', err.message);
     res.status(500).end();
@@ -367,7 +403,7 @@ function auth(req, res, next) {
 app.get('/api/wallpapers', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, title, description, price, cover_image, tags, featured, type, created_at FROM wallpapers ORDER BY featured DESC, created_at DESC',
+      'SELECT id, title, description, price, cover_image, images, tags, featured, type, created_at FROM wallpapers ORDER BY featured DESC, created_at DESC',
     );
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -376,7 +412,7 @@ app.get('/api/wallpapers', async (req, res) => {
 app.get('/api/wallpapers/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, title, description, price, cover_image, tags, featured, type, created_at FROM wallpapers WHERE id = $1',
+      'SELECT id, title, description, price, cover_image, images, tags, featured, type, created_at FROM wallpapers WHERE id = $1',
       [req.params.id],
     );
     if (!rows[0]) return res.status(404).json({ error: 'Not found' });
@@ -663,17 +699,45 @@ app.get('/api/admin/wallpapers', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Zip the given absolute file paths into uploads/files, returning the public path.
+function createPackZip(absPaths, baseName) {
+  return new Promise((resolve, reject) => {
+    const filename = `${Date.now()}-${baseName.replace(/[^a-z0-9-]/gi, '_')}.zip`;
+    const abs = path.join(__dirname, 'uploads/files', filename);
+    const out = fs.createWriteStream(abs);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    out.on('close', () => resolve(`/uploads/files/${filename}`));
+    archive.on('error', reject);
+    archive.pipe(out);
+    absPaths.forEach((p, i) => {
+      const ext = path.extname(p) || '.png';
+      archive.file(p, { name: `${baseName}-${String(i + 1).padStart(2, '0')}${ext}` });
+    });
+    archive.finalize();
+  });
+}
+
 app.post('/api/admin/wallpapers', auth,
-  upload.fields([{ name: 'cover', maxCount: 1 }, { name: 'file', maxCount: 1 }]),
+  upload.fields([
+    { name: 'cover', maxCount: 1 },
+    { name: 'file', maxCount: 1 },
+    { name: 'images', maxCount: 30 },
+  ]),
   async (req, res) => {
     const { title, description, price, tags, featured, type } = req.body;
     if (!title || !price) return res.status(400).json({ error: 'Title and price required' });
-    const cover_image = req.files?.cover?.[0] ? `/uploads/covers/${req.files.cover[0].filename}` : '';
-    const file_path   = req.files?.file?.[0]  ? `/uploads/files/${req.files.file[0].filename}`   : '';
+    const packFiles = req.files?.images || [];
+    const images = packFiles.map(f => `/uploads/covers/${f.filename}`);
+    let cover_image = req.files?.cover?.[0] ? `/uploads/covers/${req.files.cover[0].filename}` : (images[0] || '');
+    let file_path   = req.files?.file?.[0]  ? `/uploads/files/${req.files.file[0].filename}`   : '';
     try {
+      // A pack with no explicit download file gets a generated zip of all images.
+      if (!file_path && packFiles.length) {
+        file_path = await createPackZip(packFiles.map(f => f.path), title.toLowerCase().replace(/\s+/g, '-'));
+      }
       const { rows } = await pool.query(
-        'INSERT INTO wallpapers (title, description, price, cover_image, file_path, tags, featured, type) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id',
-        [title, description || '', parseFloat(price), cover_image, file_path, tags || '', featured === 'true' ? 1 : 0, type || 'other'],
+        'INSERT INTO wallpapers (title, description, price, cover_image, file_path, tags, featured, type, images) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id',
+        [title, description || '', parseFloat(price), cover_image, file_path, tags || '', featured === 'true' ? 1 : 0, type || 'other', images.length ? JSON.stringify(images) : ''],
       );
       const newId = rows[0].id;
       // Sync to Stripe in background
@@ -684,17 +748,29 @@ app.post('/api/admin/wallpapers', auth,
 );
 
 app.put('/api/admin/wallpapers/:id', auth,
-  upload.fields([{ name: 'cover', maxCount: 1 }, { name: 'file', maxCount: 1 }]),
+  upload.fields([
+    { name: 'cover', maxCount: 1 },
+    { name: 'file', maxCount: 1 },
+    { name: 'images', maxCount: 30 },
+  ]),
   async (req, res) => {
     try {
       const { rows: ex } = await pool.query('SELECT * FROM wallpapers WHERE id = $1', [req.params.id]);
       if (!ex[0]) return res.status(404).json({ error: 'Not found' });
       const e = ex[0];
       const { title, description, price, tags, featured, type } = req.body;
+      const packFiles = req.files?.images || [];
+      const images = packFiles.length
+        ? JSON.stringify(packFiles.map(f => `/uploads/covers/${f.filename}`))
+        : (e.images || '');
       const cover_image = req.files?.cover?.[0] ? `/uploads/covers/${req.files.cover[0].filename}` : e.cover_image;
-      const file_path   = req.files?.file?.[0]  ? `/uploads/files/${req.files.file[0].filename}`   : e.file_path;
+      let file_path   = req.files?.file?.[0]  ? `/uploads/files/${req.files.file[0].filename}`   : e.file_path;
+      // New pack images with no explicit download file → regenerate the zip.
+      if (packFiles.length && !req.files?.file?.[0]) {
+        file_path = await createPackZip(packFiles.map(f => f.path), (title ?? e.title).toLowerCase().replace(/\s+/g, '-'));
+      }
       await pool.query(
-        'UPDATE wallpapers SET title=$1, description=$2, price=$3, cover_image=$4, file_path=$5, tags=$6, featured=$7, type=$8 WHERE id=$9',
+        'UPDATE wallpapers SET title=$1, description=$2, price=$3, cover_image=$4, file_path=$5, tags=$6, featured=$7, type=$8, images=$9 WHERE id=$10',
         [
           title        ?? e.title,
           description  ?? e.description,
@@ -703,13 +779,18 @@ app.put('/api/admin/wallpapers/:id', auth,
           tags         ?? e.tags,
           featured === 'true' ? 1 : featured === 'false' ? 0 : e.featured,
           type         ?? e.type ?? 'other',
+          images,
           req.params.id,
         ],
       );
-      // Bust the cached watermarked covers so a replaced image is served fresh.
-      if (req.files?.cover?.[0]) {
-        coverCache.delete(String(req.params.id));
-        framedCache.delete(String(req.params.id));
+      // Bust the cached watermarked covers so replaced images are served fresh.
+      if (req.files?.cover?.[0] || packFiles.length) {
+        const id = String(req.params.id);
+        for (const cache of [coverCache, framedCache]) {
+          for (const k of [...cache.keys()]) {
+            if (k === id || k.startsWith(`${id}:`)) cache.delete(k);
+          }
+        }
       }
       res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
