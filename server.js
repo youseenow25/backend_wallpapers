@@ -198,9 +198,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const storage = multer.diskStorage({
   destination(req, file, cb) {
-    cb(null, file.fieldname === 'cover'
-      ? path.join(__dirname, 'uploads/covers')
-      : path.join(__dirname, 'uploads/files'));
+    // 'cover' and pack 'images' are public preview sources; only the
+    // downloadable 'file' belongs in the private files directory.
+    cb(null, file.fieldname === 'file'
+      ? path.join(__dirname, 'uploads/files')
+      : path.join(__dirname, 'uploads/covers'));
   },
   filename(req, file, cb) {
     cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '-')}`);
