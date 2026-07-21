@@ -648,7 +648,7 @@ app.post('/api/checkout/all-bundle', async (req, res) => {
             name: 'Complete Wallpaper Collection',
             description: `All ${wallpapers.length} wallpapers — yours forever`,
           },
-          unit_amount: 2499,
+          unit_amount: 2599,
         },
         quantity: 1,
       }],
