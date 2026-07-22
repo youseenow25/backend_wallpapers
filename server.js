@@ -822,10 +822,16 @@ app.get('/api/admin/orders', auth, async (req, res) => {
           );
           const byId = Object.fromEntries(wps.map(w => [w.id, w]));
           // Preserve purchase order and include any duplicates.
+          const { rows: tokens } = await pool.query(
+            'SELECT wallpaper_id, token FROM download_tokens WHERE order_id = $1',
+            [order.id]
+          );
+          const tokenMap = Object.fromEntries(tokens.map(t => [t.wallpaper_id, t.token]));
           wallpaperItems = ids.map(id => byId[id]).filter(Boolean).map(w => ({
             id: w.id,
             title: w.title,
             cover: w.cover_image ? `/api/covers/${w.id}` : '',
+            downloadUrl: tokenMap[w.id] ? `/api/download/${tokenMap[w.id]}` : '',
           }));
           wallpaperTitles = wallpaperItems.map(w => w.title);
         }

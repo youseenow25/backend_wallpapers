@@ -279,10 +279,12 @@ function renderOrders(orders) {
     const items = o.wallpaperItems || [];
     const productsCell = items.length
       ? `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">` +
-          items.map(it => it.cover
-            ? `<img src="${esc(it.cover)}" alt="${esc(it.title)}" title="${esc(it.title)}" style="width:38px;height:28px;object-fit:cover;border-radius:4px;background:var(--a-surface-2)" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'no-thumb',title:this.title,textContent:this.alt.slice(0,3)}))">`
-            : `<span class="no-thumb" title="${esc(it.title)}" style="width:38px;height:28px;font-size:0.6rem">${esc(it.title.slice(0, 3))}</span>`
-          ).join('') +
+          items.map((it, idx) => {
+            const dlUrl = it.downloadUrl ? ` onclick="downloadWallpaper('${esc(it.downloadUrl)}', '${esc(it.title)}'); return false;" style="cursor:pointer"` : '';
+            return it.cover
+              ? `<img src="${esc(it.cover)}" alt="${esc(it.title)}" title="${esc(it.title)}${it.downloadUrl ? ' — click to download' : ''}" style="width:38px;height:28px;object-fit:cover;border-radius:4px;background:var(--a-surface-2);${it.downloadUrl ? 'opacity:0.85;transition:opacity 0.2s;' : ''}" onmouseover="${it.downloadUrl ? 'this.style.opacity=1' : ''}" onmouseout="${it.downloadUrl ? 'this.style.opacity=0.85' : ''}"${dlUrl} onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'no-thumb',title:this.title,textContent:this.alt.slice(0,3)}))">`
+              : `<span class="no-thumb" title="${esc(it.title)}" style="width:38px;height:28px;font-size:0.6rem">${esc(it.title.slice(0, 3))}</span>`
+          }).join('') +
         `</div>`
       : `<span style="color:var(--a-text-2);font-size:0.8rem">${esc(titles)}</span>`;
     const statusClass = o.paymentStatus === 'paid' ? 'badge-yes' : 'badge-pending';
@@ -316,6 +318,16 @@ function setupLogout() {
 /* ── Modal Helpers ──────────────────────────────────────────────────────── */
 function openModal(id) { document.getElementById(id)?.classList.add('active'); }
 function closeModal(id) { document.getElementById(id)?.classList.remove('active'); }
+
+/* ── Downloads ─────────────────────────────────────────────────────────────── */
+function downloadWallpaper(url, title) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${title.replace(/[^a-z0-9]/gi, '_')}.png`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
 
 /* ── Util ───────────────────────────────────────────────────────────────── */
 function esc(str) {
