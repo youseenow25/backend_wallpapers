@@ -260,8 +260,11 @@ async function loadOrders() {
   try {
     const res = await apiFetch('/api/admin/orders');
     orders = await res.json();
+    console.log('Orders loaded:', orders.length, orders);
     renderOrders(orders);
-  } catch {}
+  } catch (err) {
+    console.error('loadOrders error:', err);
+  }
 }
 
 function renderOrders(orders) {
