@@ -17,6 +17,7 @@ async function apiFetch(path, opts = {}) {
 
 /* ── State ──────────────────────────────────────────────────────────────── */
 let wallpapers = [];
+let orders = [];
 let pendingDeleteId = null;
 let editMode = false;
 
@@ -258,7 +259,7 @@ function openDeleteModal(id) {
 async function loadOrders() {
   try {
     const res = await apiFetch('/api/admin/orders');
-    const orders = await res.json();
+    orders = await res.json();
     renderOrders(orders);
   } catch {}
 }
